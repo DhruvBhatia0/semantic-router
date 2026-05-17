@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 from datasets import Dataset, load_dataset
@@ -42,11 +42,21 @@ def load_splits(
     val_frac: float = 0.10,
     test_frac: float = 0.10,
     seed: int = 42,
+    path: Optional[str] = None,
 ) -> Splits:
-    """Load the dataset and produce a stratified 80/10/10 split."""
-    token = os.environ.get("HF_TOKEN")
-    raw = load_dataset(REPO_ID, split="train", token=token)
-    logger.info("loaded %d rows from %s", len(raw), REPO_ID)
+    """Load the dataset and produce a stratified 80/10/10 split.
+
+    If `path` is given, read rows from a local JSONL file (one row per line
+    with keys `prompt` and `ambiguity`). Otherwise pull the default config
+    from the HF dataset repo.
+    """
+    if path is not None:
+        raw = Dataset.from_json(path)
+        logger.info("loaded %d rows from %s", len(raw), path)
+    else:
+        token = os.environ.get("HF_TOKEN")
+        raw = load_dataset(REPO_ID, split="train", token=token)
+        logger.info("loaded %d rows from %s", len(raw), REPO_ID)
 
     label2id = {name: i for i, name in enumerate(LABEL_ORDER)}
     id2label = {i: name for name, i in label2id.items()}

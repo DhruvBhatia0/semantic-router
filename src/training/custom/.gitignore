@@ -5,3 +5,4 @@ uv.lock
 runs/
 wandb/
 *.egg-info/
+morph_router/data/

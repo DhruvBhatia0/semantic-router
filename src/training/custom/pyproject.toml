@@ -16,6 +16,9 @@ dependencies = [
     "huggingface_hub>=0.24",
     "python-dotenv>=1.0",
     "tqdm>=4.66",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
 ]
 
 [tool.uv]

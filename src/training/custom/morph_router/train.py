@@ -2,6 +2,34 @@
 
 Three-class classification (low / medium / high). bf16 on the GH200, class-
 weighted cross-entropy to handle imbalance, W&B reporting via env vars.
+
+Reference run command:
+
+    cd src/training/custom && \\
+      source .venv/bin/activate && \\
+      eval "$(grep -E '^(export[[:space:]]+)?(WANDB_API_KEY|HF_TOKEN)=' ~/.zshrc)" && \\
+      export WANDB_PROJECT=morph-router-ambiguity && \\
+      export WANDB_DIR="$PWD/runs" && \\
+      RUN="modernbert-r32-a64-ep10-effbs32-$(date +%Y%m%d-%H%M%S)" && \\
+      export WANDB_NAME="$RUN" && \\
+      mkdir -p "$WANDB_DIR" && \\
+      OUT="$WANDB_DIR/$RUN" && \\
+      LOG="$OUT.log" && \\
+      nohup python -u -m morph_router.train \\
+        --model modernbert-base \\
+        --epochs 10 \\
+        --batch-size 8 --grad-accum 4 \\
+        --learning-rate 2e-4 \\
+        --lora-rank 32 --lora-alpha 64 \\
+        --max-length 8192 \\
+        --logging-steps 10 \\
+        --output-dir "$OUT" >"$LOG" 2>&1 &
+
+Behaviour notes:
+- One eval + one adapter checkpoint per epoch (`save_strategy="epoch"`).
+- `save_total_limit=None` keeps every epoch's checkpoint under `$OUT/checkpoint-*`.
+- After training, the best-by-macro_f1 checkpoint is reloaded and saved as the
+  top-level adapter at `$OUT/`.
 """
 
 from __future__ import annotations
@@ -74,6 +102,9 @@ def build_model(model_name: str, splits: Splits, lora_rank: int, lora_alpha: int
     )
     model = get_peft_model(base, peft_cfg)
     model.print_trainable_parameters()
+    # PEFT + gradient checkpointing: base weights are frozen, so we must
+    # explicitly tell inputs to require grad or no gradient flows through.
+    model.enable_input_require_grads()
     return model, tokenizer
 
 
@@ -131,7 +162,7 @@ def run(args: argparse.Namespace) -> None:
     logger.info("device=%s", device_str)
     clear_gpu_memory()
 
-    splits = load_splits(seed=args.seed)
+    splits = load_splits(seed=args.seed, path=args.data_path)
 
     model, tokenizer = build_model(
         args.model, splits, lora_rank=args.lora_rank, lora_alpha=args.lora_alpha
@@ -157,17 +188,18 @@ def run(args: argparse.Namespace) -> None:
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.learning_rate,
         lr_scheduler_type="cosine",
         warmup_ratio=0.06,
         weight_decay=0.01,
         max_grad_norm=1.0,
         bf16=True,
-        eval_strategy="steps",
-        eval_steps=args.eval_steps,
-        save_strategy="steps",
-        save_steps=args.eval_steps,
-        save_total_limit=2,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=None,           # keep every epoch checkpoint
         load_best_model_at_end=True,
         metric_for_best_model="macro_f1",
         greater_is_better=True,
@@ -227,17 +259,22 @@ def run(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="modernbert-base")
-    p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--epochs", type=int, default=3)              # upstream README + argparse default
+    p.add_argument("--batch-size", type=int, default=8)          # per-step; smaller because max_length=8192
+    p.add_argument("--grad-accum", type=int, default=4)          # effective batch = batch-size * grad-accum
     p.add_argument("--learning-rate", type=float, default=2e-4)
-    p.add_argument("--lora-rank", type=int, default=16)
-    p.add_argument("--lora-alpha", type=int, default=32)
-    p.add_argument("--max-length", type=int, default=2048,
+    p.add_argument("--lora-rank", type=int, default=32)          # upstream script default
+    p.add_argument("--lora-alpha", type=int, default=64)         # upstream script default
+    p.add_argument("--max-length", type=int, default=8192,
                    help="cap (will also be clipped to model max).")
-    p.add_argument("--eval-steps", type=int, default=50)
     p.add_argument("--logging-steps", type=int, default=10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--gpu-id", type=int, default=0)
+    p.add_argument(
+        "--data-path",
+        default=None,
+        help="Optional local JSONL path. If unset, loads from the HF dataset repo.",
+    )
     p.add_argument(
         "--output-dir",
         default=f"runs/morph-router-{time.strftime('%Y%m%d-%H%M%S')}",
